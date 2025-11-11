@@ -2,20 +2,15 @@ from typing import List, Optional
 from django.contrib.auth.models import User
 from django.db import IntegrityError
 from .models import (
-    Activity,
-    Profile,
-    Comment,
-    Kudos,
-    Follower,
-    ActivityPoint,
-    UserMonthlyStats
+    Activity, Profile, Comment, Kudos, Follower, ActivityPoint, UserMonthlyStats
 )
+from django.db.models import Sum, Count, Avg, Max, F  # For aggregation
 
 
-# --- 1. Базовий інтерфейс (як у вашому repository_interface.py) ---
 class BaseRepository:
     """
-    Базовий клас-інтерфейс, що визначає загальні методи.
+    (КОНТРАКТ)
+    Вимагає, щоб кожен дочірній репозиторій реалізував ці методи.
     """
 
     def get_by_id(self, model_id: int):
@@ -24,17 +19,18 @@ class BaseRepository:
     def get_all(self):
         raise NotImplementedError
 
-    def add(self, model):
+    def add(self, **kwargs):
+        raise NotImplementedError
+
+    def update(self, model_id: int, **kwargs) -> bool:
+        raise NotImplementedError
+
+    def delete(self, **kwargs) -> bool:
         raise NotImplementedError
 
 
-# --- 2. Реалізація репозиторіїв для кожної моделі ---
-
+# --- РЕПОЗИТОРІЙ 1: USER ---
 class UserRepository(BaseRepository):
-    """
-    Репозиторій для моделі User.
-    Використовує вбудовану модель User від Django.
-    """
 
     def get_by_id(self, model_id: int) -> Optional[User]:
         try:
@@ -46,16 +42,45 @@ class UserRepository(BaseRepository):
         return User.objects.all()
 
     def add(self, **kwargs) -> User:
-        """Створює нового користувача. kwargs: username, email, password"""
+        # Ваш UserSerializer.create() подбає про хешування
         return User.objects.create_user(**kwargs)
 
+    def update(self, model_id: int, **kwargs) -> bool:
+        if 'password' in kwargs and kwargs['password'] is None:
+            del kwargs['password']
 
+        # Оновлюємо звичайні поля
+        count = User.objects.filter(id=model_id).update(**kwargs)
+
+        if 'password' in kwargs and kwargs['password'] is not None:
+            user = self.get_by_id(model_id)
+            if user:
+                user.set_password(kwargs['password'])
+                user.save()
+        return count > 0
+
+    def delete(self, **kwargs) -> bool:
+        count, _ = User.objects.filter(id=kwargs.get('id')).delete()
+        return count > 0
+
+    def get_user_stats_report(self):
+        """Звіт: Агрегована статистика по користувачам"""
+        return User.objects.aggregate(
+            total_users=Count('id'),
+            users_with_profiles=Count('profile')
+        )
+
+
+# --- РЕПОЗИТОРІЙ 2: PROFILE ---
 class ProfileRepository(BaseRepository):
-    """Репозиторій для моделі Profile."""
 
     def get_by_id(self, model_id: int) -> Optional[Profile]:
+        """
+        ВИПРАВЛЕНО: Profile.id - це user.id, оскільки це OneToOneField.
+        Тому ми шукаємо по 'user_id', а не 'id'.
+        """
         try:
-            return Profile.objects.get(id=model_id)
+            return Profile.objects.get(user_id=model_id)
         except Profile.DoesNotExist:
             return None
 
@@ -63,12 +88,32 @@ class ProfileRepository(BaseRepository):
         return Profile.objects.all()
 
     def add(self, **kwargs) -> Profile:
-        """Створює новий профіль. kwargs: user, display_name, ..."""
+        # kwargs має містити 'user' або 'user_id'
         return Profile.objects.create(**kwargs)
 
+    def update(self, model_id: int, **kwargs) -> bool:
+        # 'model_id' тут - це user_id
+        count = Profile.objects.filter(user_id=model_id).update(**kwargs)
+        return count > 0
 
+    def delete(self, **kwargs) -> bool:
+        count, _ = Profile.objects.filter(user_id=kwargs.get('id')).delete()
+        return count > 0
+
+    def get_global_profiles_stats_report(self):
+        """
+        Звіт: Агрегована статистика по профілях.
+        """
+        return Profile.objects.aggregate(
+            total_profiles=Count('user'),
+            average_age=Avg('age'),
+            average_weight_kg=Avg('weight_kg'),
+            average_height_cm=Avg('height_cm')
+        )
+
+
+# --- РЕПОЗИТОРІЙ 3: ACTIVITY ---
 class ActivityRepository(BaseRepository):
-    """Репозиторій для моделі Activity."""
 
     def get_by_id(self, model_id: int) -> Optional[Activity]:
         try:
@@ -80,12 +125,28 @@ class ActivityRepository(BaseRepository):
         return Activity.objects.all()
 
     def add(self, **kwargs) -> Activity:
-        """Створює нову активність. kwargs: user, duration_sec, ..."""
         return Activity.objects.create(**kwargs)
 
+    def update(self, model_id: int, **kwargs) -> bool:
+        count = Activity.objects.filter(id=model_id).update(**kwargs)
+        return count > 0
 
+    def delete(self, **kwargs) -> bool:
+        count, _ = Activity.objects.filter(id=kwargs.get('id')).delete()
+        return count > 0
+
+    def get_global_stats_report(self):
+        """Звіт: Агрегована статистика по всіх активностях"""
+        return Activity.objects.aggregate(
+            total_activities=Count('id'),
+            total_distance_meters=Sum('distance_m'),
+            total_duration_seconds=Sum('duration_sec'),
+            average_elevation_gain=Avg('elevation_gain_m')
+        )
+
+
+# --- РЕПОЗИТОРІЙ 4: COMMENT ---
 class CommentRepository(BaseRepository):
-    """Репозиторій для моделі Comment."""
 
     def get_by_id(self, model_id: int) -> Optional[Comment]:
         try:
@@ -97,12 +158,25 @@ class CommentRepository(BaseRepository):
         return Comment.objects.all()
 
     def add(self, **kwargs) -> Comment:
-        """Створює новий коментар. kwargs: activity, user, body, ..."""
         return Comment.objects.create(**kwargs)
 
+    def update(self, model_id: int, **kwargs) -> bool:
+        count = Comment.objects.filter(id=model_id).update(**kwargs)
+        return count > 0
 
+    def delete(self, **kwargs) -> bool:
+        count, _ = Comment.objects.filter(id=kwargs.get('id')).delete()
+        return count > 0
+
+    def get_comment_stats_report(self):
+        """Звіт: Найбільш коментовані активності"""
+        return Comment.objects.values('activity_id').annotate(
+            comment_count=Count('id')
+        ).order_by('-comment_count')
+
+
+# --- РЕПОЗИТОРІЙ 5: KUDOS ---
 class KudosRepository(BaseRepository):
-    """Репозиторій для моделі Kudos."""
 
     def get_by_id(self, model_id: int) -> Optional[Kudos]:
         try:
@@ -114,15 +188,62 @@ class KudosRepository(BaseRepository):
         return Kudos.objects.all()
 
     def add(self, **kwargs) -> Kudos:
-        """Створює нові kudos. kwargs: activity, user"""
+        return Kudos.objects.create(**kwargs)
+
+    def update(self, model_id: int, **kwargs) -> bool:
+        count = Kudos.objects.filter(id=model_id).update(**kwargs)
+        return count > 0
+
+    def delete(self, **kwargs) -> bool:
+        count, _ = Kudos.objects.filter(id=kwargs.get('id')).delete()
+        return count > 0
+
+    def get_kudos_stats_report(self):
+        """Звіт: Активності з найбільшою кількістю 'kudos'"""
+        return Kudos.objects.values('activity_id').annotate(
+            kudos_count=Count('id')
+        ).order_by('-kudos_count')
+
+
+# --- РЕПОЗИТОРІЙ 6: FOLLOWER ---
+class FollowerRepository(BaseRepository):
+
+    def get_by_id(self, model_id: int):
+        raise NotImplementedError("Використовуйте get_by_composite_key")
+
+    def get_by_composite_key(self, follower_id: int, followee_id: int) -> Optional[Follower]:
         try:
-            return Kudos.objects.create(**kwargs)
-        except IntegrityError:  # Якщо юзер вже лайкнув
+            return Follower.objects.get(follower_id=follower_id, followee_id=followee_id)
+        except Follower.DoesNotExist:
             return None
 
+    def get_all(self) -> List[Follower]:
+        return Follower.objects.all()
 
+    def add(self, **kwargs) -> Follower:
+        # kwargs: {'follower': User_obj, 'followee': User_obj}
+        return Follower.objects.create(**kwargs)
+
+    def update(self, model_id: int, **kwargs) -> bool:
+        raise NotImplementedError("Follower не оновлюється, а видаляється/створюється")
+
+    def delete(self, **kwargs) -> bool:
+        # kwargs: {'follower_id': 1, 'followee_id': 2}
+        count, _ = Follower.objects.filter(
+            follower_id=kwargs.get('follower_id'),
+            followee_id=kwargs.get('followee_id')
+        ).delete()
+        return count > 0
+
+    def get_follower_stats_report(self):
+        """Звіт: Топ-10 найпопулярніших користувачів (кого найбільше фоловлять)"""
+        return Follower.objects.values('followee_id').annotate(
+            follower_count=Count('id')
+        ).order_by('-follower_count')[:10]
+
+
+# --- РЕПОЗИТОРІЙ 7: ACTIVITYPOINT ---
 class ActivityPointRepository(BaseRepository):
-    """Репозиторій для моделі ActivityPoint."""
 
     def get_by_id(self, model_id: int) -> Optional[ActivityPoint]:
         try:
@@ -134,42 +255,26 @@ class ActivityPointRepository(BaseRepository):
         return ActivityPoint.objects.all()
 
     def add(self, **kwargs) -> ActivityPoint:
-        """Створює нову точку. kwargs: activity, lat, lon, ..."""
         return ActivityPoint.objects.create(**kwargs)
 
+    def update(self, model_id: int, **kwargs) -> bool:
+        count = ActivityPoint.objects.filter(id=model_id).update(**kwargs)
+        return count > 0
 
-class FollowerRepository(BaseRepository):
-    """Репозиторій для моделі Follower (має композитний ключ)."""
-
-    def get_by_id(self, model_id: int):
-        raise NotImplementedError("Follower не має єдиного ID, використовуйте get_by_composite_id")
-
-    def get_by_composite_id(self, follower: User, followee: User) -> Optional[Follower]:
-        try:
-            return Follower.objects.get(follower=follower, followee=followee)
-        except Follower.DoesNotExist:
-            return None
-
-    def get_all(self) -> List[Follower]:
-        return Follower.objects.all()
-
-    def add(self, **kwargs) -> Follower:
-        """Створює підписку. kwargs: follower, followee"""
-        try:
-            return Follower.objects.create(**kwargs)
-        except IntegrityError:  # Якщо вже підписаний
-            return None
+    def delete(self, **kwargs) -> bool:
+        count, _ = ActivityPoint.objects.filter(id=kwargs.get('id')).delete()
+        return count > 0
 
 
+# --- РЕПОЗИТОРІЙ 8: USERMONTHLYSTATS ---
 class UserMonthlyStatsRepository(BaseRepository):
-    """Репозиторій для моделі UserMonthlyStats (має композитний ключ)."""
 
     def get_by_id(self, model_id: int):
-        raise NotImplementedError("UserMonthlyStats не має єдиного ID, використовуйте get_by_composite_id")
+        raise NotImplementedError("Використовуйте get_by_composite_key")
 
-    def get_by_composite_id(self, user: User, year: int, month: int) -> Optional[UserMonthlyStats]:
+    def get_by_composite_key(self, user_id: int, year: int, month: int) -> Optional[UserMonthlyStats]:
         try:
-            return UserMonthlyStats.objects.get(user=user, year=year, month=month)
+            return UserMonthlyStats.objects.get(user_id=user_id, year=year, month=month)
         except UserMonthlyStats.DoesNotExist:
             return None
 
@@ -177,21 +282,42 @@ class UserMonthlyStatsRepository(BaseRepository):
         return UserMonthlyStats.objects.all()
 
     def add(self, **kwargs) -> UserMonthlyStats:
-        """Створює статистику. kwargs: user, year, month, ..."""
         return UserMonthlyStats.objects.create(**kwargs)
 
+    def update(self, model_id, **kwargs):
+        user = kwargs.get('user')
+        year = kwargs.get('year')
+        month = kwargs.get('month')
 
-# --- 3. ЄДИНА ТОЧКА ДОСТУПУ (DataAccessLayer) ---
+        if not all([user, year, month]):
+            raise ValueError("Для оновлення UserMonthlyStats потрібні user, year, month")
 
+        stats, created = UserMonthlyStats.objects.update_or_create(
+            user=user,
+            year=year,
+            month=month,
+            defaults=kwargs
+        )
+        return not created
+
+    def delete(self, **kwargs) -> bool:
+        count, _ = UserMonthlyStats.objects.filter(
+            user_id=kwargs.get('user_id'),
+            year=kwargs.get('year'),
+            month=kwargs.get('month')
+        ).delete()
+        return count > 0
+
+    def get_distance_leaderboard_report(self):
+        """Звіт: Глобальний лідерборд по загальній дистанції"""
+        return UserMonthlyStats.objects.values('user__username').annotate(
+            total_distance=Sum('total_distance_m')
+        ).order_by('-total_distance')
+
+
+# --- ЄДИНА ТОЧКА ДОСТУПУ (DataAccessLayer) ---
 class DataAccessLayer:
-    """
-    Єдина точка доступу до всіх репозиторіїв.
-    Це імітує ваш старий клас DataAccessLayer.
-    """
-
     def __init__(self):
-        # Ми не приймаємо 'connection', бо Django керує цим.
-        # Ми просто створюємо екземпляри наших репозиторіїв.
         self.users = UserRepository()
         self.profiles = ProfileRepository()
         self.activities = ActivityRepository()
@@ -202,10 +328,7 @@ class DataAccessLayer:
         self.user_stats = UserMonthlyStatsRepository()
 
     def __enter__(self):
-        # Цей метод потрібен для 'with DataAccessLayer() as db:'
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # У Django нам не потрібно закривати з'єднання вручну.
-        # Просто виводимо повідомлення.
-        self.stdout.write(self.style.WARNING("\nDataAccessLayer: Роботу завершено."))
+        pass
